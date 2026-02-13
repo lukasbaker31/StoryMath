@@ -1,0 +1,9 @@
+node_modules/
+.next/
+__pycache__/
+*.pyc
+venv/
+projects/
+.env
+.DS_Store
+.claude/
