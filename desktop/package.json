@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "StoryMath — Sketch-to-animation desktop app",
   "private": true,
+  "repository": "github:lukasbaker31/StoryMath",
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",

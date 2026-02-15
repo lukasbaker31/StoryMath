@@ -12,8 +12,6 @@ jobs:
         include:
           - os: macos-latest        # ARM64 (M-series)
             build_flag: --mac
-          - os: macos-13            # x64 (Intel)
-            build_flag: --mac
           - os: windows-latest      # x64
             build_flag: --win
 
