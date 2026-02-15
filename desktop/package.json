@@ -1,0 +1,20 @@
+{
+  "name": "storymath-desktop",
+  "version": "0.1.0",
+  "description": "StoryMath — Sketch-to-animation desktop app",
+  "private": true,
+  "main": "src/main/index.js",
+  "scripts": {
+    "start": "electron .",
+    "setup": "bash scripts/setup.sh",
+    "copy-sources": "bash scripts/copy-sources.sh",
+    "build-frontend": "bash scripts/build-frontend.sh",
+    "package": "electron-packager . StoryMath --platform=darwin --arch=arm64 --out=dist --overwrite --ignore='frontend/node_modules' --ignore='frontend/\\.next' --ignore='scripts' --ignore='backend/venv' --ignore='dist'"
+  },
+  "dependencies": {
+    "electron": "^33.0.0"
+  },
+  "devDependencies": {
+    "electron-packager": "^17.1.2"
+  }
+}
