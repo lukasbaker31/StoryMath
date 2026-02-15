@@ -25,8 +25,9 @@ const SAMPLES_DIR = path.join(DESKTOP_DIR, 'manim_code_samples');
 /** Return candidate Python paths to search (evaluated lazily so app.getPath works). */
 function getVenvCandidates() {
   return [
-    path.join(BACKEND_DIR, 'venv', 'bin', 'python'),                    // bundled or dev
-    path.join(DESKTOP_DIR, '..', 'backend', 'venv', 'bin', 'python'),   // original project (dev mode)
+    path.join(DESKTOP_DIR, 'python', 'bin', 'python'),                   // embedded standalone
+    path.join(BACKEND_DIR, 'venv', 'bin', 'python'),                     // bundled venv
+    path.join(DESKTOP_DIR, '..', 'backend', 'venv', 'bin', 'python'),    // original project (dev mode)
     path.join(app.getPath('home'), 'Documents', 'StoryMath', 'backend', 'venv', 'bin', 'python'), // known project location
   ];
 }
@@ -166,9 +167,14 @@ function startBackend(port, apiKey) {
   // Tell templates.py where manim_code_samples lives
   env.STORYMATH_SAMPLES_DIR = SAMPLES_DIR;
 
-  // Ensure Homebrew and LaTeX binaries are findable
-  const extraPaths = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin', '/Library/TeX/texbin'];
+  // Add embedded Python bin (for ffmpeg), Homebrew, and LaTeX to PATH
+  const embeddedBin = path.join(DESKTOP_DIR, 'python', 'bin');
+  const extraPaths = [embeddedBin, '/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin', '/Library/TeX/texbin'];
   env.PATH = extraPaths.join(':') + ':' + (env.PATH || '');
+
+  // Add bundled dylibs to library search path (for pycairo's libcairo, etc.)
+  const dylibDir = path.join(DESKTOP_DIR, 'python', 'lib', 'dylibs');
+  env.DYLD_LIBRARY_PATH = dylibDir + ':' + (env.DYLD_LIBRARY_PATH || '');
 
   backendProcess = spawn(pythonExe, [
     path.join(BACKEND_DIR, 'main.py'),
