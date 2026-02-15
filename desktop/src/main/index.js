@@ -15,20 +15,38 @@ const http = require('http');
 const keyStore = require('./key-store');
 
 // ---------------------------------------------------------------------------
-// Paths
+// Platform
 // ---------------------------------------------------------------------------
-const DESKTOP_DIR = path.resolve(__dirname, '..', '..');
+const IS_WIN = process.platform === 'win32';
+const IS_MAC = process.platform === 'darwin';
+const PATH_SEP = IS_WIN ? ';' : ':';
+
+// ---------------------------------------------------------------------------
+// Paths — electron-builder puts extraResources at process.resourcesPath
+// ---------------------------------------------------------------------------
+const IS_PACKAGED = app.isPackaged;
+const DESKTOP_DIR = IS_PACKAGED
+  ? process.resourcesPath
+  : path.resolve(__dirname, '..', '..');
 const BACKEND_DIR = path.join(DESKTOP_DIR, 'backend');
 const STATIC_DIR = path.join(DESKTOP_DIR, 'frontend', 'out');
 const SAMPLES_DIR = path.join(DESKTOP_DIR, 'manim_code_samples');
 
+/** Platform-aware Python executable path. */
+function embeddedPythonExe() {
+  return IS_WIN
+    ? path.join(DESKTOP_DIR, 'python', 'python.exe')
+    : path.join(DESKTOP_DIR, 'python', 'bin', 'python');
+}
+
 /** Return candidate Python paths to search (evaluated lazily so app.getPath works). */
 function getVenvCandidates() {
+  const venvPython = IS_WIN ? 'Scripts\\python.exe' : 'bin/python';
   return [
-    path.join(DESKTOP_DIR, 'python', 'bin', 'python'),                   // embedded standalone
-    path.join(BACKEND_DIR, 'venv', 'bin', 'python'),                     // bundled venv
-    path.join(DESKTOP_DIR, '..', 'backend', 'venv', 'bin', 'python'),    // original project (dev mode)
-    path.join(app.getPath('home'), 'Documents', 'StoryMath', 'backend', 'venv', 'bin', 'python'), // known project location
+    embeddedPythonExe(),                                                           // embedded standalone
+    path.join(BACKEND_DIR, 'venv', venvPython),                                    // bundled venv
+    path.join(DESKTOP_DIR, '..', 'backend', 'venv', venvPython),                   // original project (dev mode)
+    path.join(app.getPath('home'), 'Documents', 'StoryMath', 'backend', 'venv', venvPython),
   ];
 }
 
@@ -156,7 +174,8 @@ function startBackend(port, apiKey) {
   // Determine the Python executable — check all candidate paths, fall back to system
   const fs = require('fs');
   const candidates = getVenvCandidates();
-  const pythonExe = candidates.find(p => fs.existsSync(p)) || 'python3';
+  const fallbackPython = IS_WIN ? 'python' : 'python3';
+  const pythonExe = candidates.find(p => fs.existsSync(p)) || fallbackPython;
   console.log(`[storymath] Using Python: ${pythonExe}`);
 
   const env = { ...process.env };
@@ -167,14 +186,24 @@ function startBackend(port, apiKey) {
   // Tell templates.py where manim_code_samples lives
   env.STORYMATH_SAMPLES_DIR = SAMPLES_DIR;
 
-  // Add embedded Python bin (for ffmpeg), Homebrew, and LaTeX to PATH
-  const embeddedBin = path.join(DESKTOP_DIR, 'python', 'bin');
-  const extraPaths = [embeddedBin, '/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin', '/Library/TeX/texbin'];
-  env.PATH = extraPaths.join(':') + ':' + (env.PATH || '');
+  // Add embedded Python bin dir (for ffmpeg, python) to PATH
+  const embeddedBin = IS_WIN
+    ? path.join(DESKTOP_DIR, 'python')            // python.exe + ffmpeg.exe at top level
+    : path.join(DESKTOP_DIR, 'python', 'bin');     // bin/python + bin/ffmpeg
+  const extraPaths = [embeddedBin];
+  if (IS_MAC) {
+    extraPaths.push('/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin', '/Library/TeX/texbin');
+  }
+  env.PATH = extraPaths.join(PATH_SEP) + PATH_SEP + (env.PATH || '');
 
-  // Add bundled dylibs to library search path (for pycairo's libcairo, etc.)
-  const dylibDir = path.join(DESKTOP_DIR, 'python', 'lib', 'dylibs');
-  env.DYLD_LIBRARY_PATH = dylibDir + ':' + (env.DYLD_LIBRARY_PATH || '');
+  // Library search path (macOS: DYLD_LIBRARY_PATH, Linux: LD_LIBRARY_PATH, Windows: DLLs on PATH)
+  if (IS_MAC) {
+    const dylibDir = path.join(DESKTOP_DIR, 'python', 'lib', 'dylibs');
+    env.DYLD_LIBRARY_PATH = dylibDir + ':' + (env.DYLD_LIBRARY_PATH || '');
+  } else if (process.platform === 'linux') {
+    const soDir = path.join(DESKTOP_DIR, 'python', 'lib', 'dylibs');
+    env.LD_LIBRARY_PATH = soDir + ':' + (env.LD_LIBRARY_PATH || '');
+  }
 
   backendProcess = spawn(pythonExe, [
     path.join(BACKEND_DIR, 'main.py'),
@@ -203,13 +232,18 @@ function startBackend(port, apiKey) {
 /** Kill the backend process. */
 function stopBackend() {
   if (backendProcess) {
-    backendProcess.kill('SIGTERM');
-    // Force kill after 3 seconds if still alive
-    setTimeout(() => {
-      if (backendProcess) {
-        backendProcess.kill('SIGKILL');
-      }
-    }, 3000);
+    if (IS_WIN) {
+      // Windows: SIGTERM doesn't work reliably — use taskkill
+      try { process.kill(backendProcess.pid); } catch {}
+    } else {
+      backendProcess.kill('SIGTERM');
+      // Force kill after 3 seconds if still alive
+      setTimeout(() => {
+        if (backendProcess) {
+          backendProcess.kill('SIGKILL');
+        }
+      }, 3000);
+    }
   }
 }
 

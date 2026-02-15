@@ -6,17 +6,14 @@
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",
-    "setup": "bash scripts/setup.sh",
-    "copy-sources": "bash scripts/copy-sources.sh",
-    "setup-python": "bash scripts/setup-python.sh",
-    "bundle-deps": "bash scripts/bundle-deps.sh",
-    "build-frontend": "bash scripts/build-frontend.sh",
-    "package": "electron-packager . StoryMath --platform=darwin --arch=arm64 --out=dist --overwrite --ignore='frontend/node_modules' --ignore='frontend/\\.next' --ignore='^/scripts' --ignore='backend/venv' --ignore='^/dist'"
-  },
-  "dependencies": {
-    "electron": "^33.0.0"
+    "setup": "node scripts/setup.js",
+    "build:mac": "electron-builder --mac",
+    "build:win": "electron-builder --win",
+    "build:linux": "electron-builder --linux",
+    "build": "electron-builder"
   },
   "devDependencies": {
-    "electron-packager": "^17.1.2"
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
   }
 }

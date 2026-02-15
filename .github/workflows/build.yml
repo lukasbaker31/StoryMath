@@ -1,0 +1,53 @@
+name: Build & Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest        # ARM64 (M-series)
+            build_flag: --mac
+          - os: macos-13            # x64 (Intel)
+            build_flag: --mac
+          - os: windows-latest      # x64
+            build_flag: --win
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # macOS: install native build deps for pycairo (compiles from source)
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        run: brew install cairo pkg-config pango libffi freetype fontconfig libpng pixman
+
+      # Windows: no extra deps needed — pycairo ships pre-built wheels
+
+      - name: Run setup (download Python, install deps, build frontend)
+        working-directory: desktop
+        run: node scripts/setup.js
+        env:
+          # Increase Node memory for Next.js build
+          NODE_OPTIONS: '--max-old-space-size=4096'
+
+      - name: Install desktop npm dependencies
+        working-directory: desktop
+        run: npm install
+
+      - name: Build installer with electron-builder
+        working-directory: desktop
+        run: npx electron-builder ${{ matrix.build_flag }} --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

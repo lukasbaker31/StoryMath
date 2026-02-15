@@ -4,3 +4,6 @@ backend/
 manim_code_samples/
 python/
 dist/
+*.dmg
+*.AppImage
+*.exe
