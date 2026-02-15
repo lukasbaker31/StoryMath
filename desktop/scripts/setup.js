@@ -585,7 +585,8 @@ async function bundleFfmpeg(ffmpegExe) {
 
   try {
     console.log(`    Downloading ffmpeg for ${PLATFORM}/${ARCH}...`);
-    await download(ffmpegUrl, archivePath);
+    // Use curl instead of Node HTTP client — handles GitHub redirects and large files reliably
+    run(`curl -L --fail --retry 3 -o "${archivePath}" "${ffmpegUrl}"`, { timeout: 300000 });
 
     console.log('    Extracting...');
     const destDir = path.dirname(ffmpegExe);
