@@ -10,6 +10,15 @@ export interface RenderResponse {
   ok: boolean
   mp4_url: string | null
   log: string
+  render_id?: string
+  render_name?: string
+}
+
+export interface SavedRender {
+  id: string
+  name: string
+  created_at: string
+  quality: string
 }
 
 export interface GenerateResponse {
@@ -47,6 +56,11 @@ export interface TemplateExample {
 export interface TemplatesResponse {
   categories: TemplateCategory[]
   examples: TemplateExample[]
+}
+
+export interface FrameImage {
+  name: string
+  base64: string
 }
 
 export interface ChatMessage {
@@ -101,7 +115,7 @@ export const api = {
   },
 
   async generate(
-    imageBase64: string,
+    images: FrameImage[],
     prompt: string,
     model: string = 'claude-sonnet-4-5-20250929',
     selectedComponents?: string[]
@@ -110,7 +124,7 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        image_base64: imageBase64,
+        images,
         prompt,
         model,
         selected_components: selectedComponents?.length ? selectedComponents : null,
@@ -156,8 +170,98 @@ export const api = {
     return res.json()
   },
 
+  async renderStream(
+    sceneCode: string,
+    quality: string = 'l',
+    onLog?: (line: string) => void
+  ): Promise<RenderResponse> {
+    const res = await fetch(`${API_BASE}/api/render/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scene_code: sceneCode, quality }),
+    })
+
+    const reader = res.body?.getReader()
+    if (!reader) {
+      return { ok: false, mp4_url: null, log: 'No response stream' }
+    }
+
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let finalResult: RenderResponse | null = null
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        const payload = line.slice(6)
+        try {
+          const event = JSON.parse(payload)
+          if (event.type === 'log' && onLog) {
+            onLog(event.line)
+          } else if (event.type === 'result') {
+            finalResult = {
+              ok: event.ok,
+              mp4_url: event.mp4_url,
+              log: event.log || '',
+              render_id: event.render_id,
+              render_name: event.render_name,
+            }
+          }
+        } catch {
+          // ignore parse errors
+        }
+      }
+    }
+
+    return finalResult || { ok: false, mp4_url: null, log: 'No result received' }
+  },
+
+  async stitchRenders(
+    renderIds: string[],
+    name?: string
+  ): Promise<{ ok: boolean; render_id?: string; render_name?: string }> {
+    const res = await fetch(`${API_BASE}/api/renders/stitch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ render_ids: renderIds, name }),
+    })
+    return res.json()
+  },
+
   renderMp4Url(cacheBust?: boolean): string {
     const url = `${API_BASE}/api/render.mp4`
     return cacheBust ? `${url}?t=${Date.now()}` : url
+  },
+
+  async listRenders(): Promise<SavedRender[]> {
+    const res = await fetch(`${API_BASE}/api/renders`)
+    return res.json()
+  },
+
+  async renameRender(id: string, name: string): Promise<{ ok: boolean }> {
+    const res = await fetch(`${API_BASE}/api/renders/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    })
+    return res.json()
+  },
+
+  async deleteRender(id: string): Promise<{ ok: boolean }> {
+    const res = await fetch(`${API_BASE}/api/renders/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    })
+    return res.json()
+  },
+
+  renderVideoUrl(id: string): string {
+    return `${API_BASE}/api/renders/${encodeURIComponent(id)}/video`
   },
 }

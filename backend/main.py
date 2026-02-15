@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import re
@@ -5,13 +6,16 @@ import sys
 import glob
 import shutil
 import subprocess
+import tempfile
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import anthropic
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from templates import catalog
@@ -29,6 +33,7 @@ app.add_middleware(
 )
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent / "projects" / "default"
+RENDERS_DIR = PROJECT_DIR / "renders"
 
 DEFAULT_SCENE = '''from manim import *
 
@@ -109,24 +114,87 @@ class RenderRequest(BaseModel):
     quality: str = "l"  # l=480p, m=720p, h=1080p
 
 
+class FrameImage(BaseModel):
+    name: str
+    base64: str
+
+
 class GenerateRequest(BaseModel):
-    image_base64: str
+    images: list[FrameImage] = []
+    image_base64: str | None = None  # legacy single-image fallback
     prompt: str = ""
     model: str = "claude-sonnet-4-5-20250929"
     selected_components: list[str] | None = None
+
+
+class SavedRender(BaseModel):
+    id: str
+    name: str
+    created_at: str
+    quality: str
+
+
+class RenameRenderRequest(BaseModel):
+    name: str
+
+
+class StitchRequest(BaseModel):
+    render_ids: list[str]
+    name: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Render library helpers
+# ---------------------------------------------------------------------------
+
+RENDERS_INDEX_PATH = PROJECT_DIR / "renders.json"
+
+
+def load_renders_index() -> list[dict]:
+    if RENDERS_INDEX_PATH.exists():
+        with open(RENDERS_INDEX_PATH, "r") as f:
+            return json.load(f)
+    return []
+
+
+def save_renders_index(renders: list[dict]):
+    RENDERS_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(RENDERS_INDEX_PATH, "w") as f:
+        json.dump(renders, f, indent=2)
+
+
+def auto_save_render(mp4_path: str, quality: str) -> dict:
+    """Save a rendered MP4 into the library and return its metadata."""
+    RENDERS_DIR.mkdir(parents=True, exist_ok=True)
+    renders = load_renders_index()
+    render_id = str(uuid.uuid4())
+    render_num = len(renders) + 1
+    entry = {
+        "id": render_id,
+        "name": f"Render {render_num}",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "quality": quality,
+    }
+    shutil.copy2(mp4_path, str(RENDERS_DIR / f"{render_id}.mp4"))
+    renders.append(entry)
+    save_renders_index(renders)
+    return entry
 
 
 # ---------------------------------------------------------------------------
 # Dynamic system prompt for generation
 # ---------------------------------------------------------------------------
 
-BASE_SYSTEM_PROMPT = """You are an expert Manim developer specializing in quantum computing visualizations. You receive a rough hand-drawn sketch and must produce a polished Manim animation that captures the CONCEPT the user is communicating — NOT a literal reproduction of messy hand-drawn lines.
+BASE_SYSTEM_PROMPT = """You are an expert Manim developer specializing in quantum computing visualizations. You receive one or more storyboard frames (rough hand-drawn sketches) and must produce a polished Manim animation that captures the CONCEPT the user is communicating — NOT a literal reproduction of messy hand-drawn lines.
+
+When multiple frames are provided, they represent sequential states of a storyboard — the animation should flow through each frame in order, with smooth transitions between states. Frame 1 is the starting state, the last frame is the ending state, and intermediate frames are keyframes the animation should pass through.
 
 STEP 1 — ANALYZE (do this silently, do not output your analysis):
 - Identify the conceptual elements: What objects, shapes, or ideas is the user trying to represent?
 - Read any text or labels in the sketch for intent clues.
 - Determine spatial relationships: What is above/below/beside what? What connects to what?
 - Identify the likely animation flow: What should appear first? What transforms into what?
+- If multiple frames are provided, identify what changes between frames and plan smooth transitions.
 - Compare with the user's text prompt (if provided) to understand their goal.
 - IGNORE drawing imperfections — a wobbly circle means "circle", a rough arrow means "arrow", messy handwriting should be interpreted as clean text.
 
@@ -328,7 +396,14 @@ def render_scene(req: RenderRequest):
         if mp4_files and result.returncode == 0:
             latest = max(mp4_files, key=os.path.getmtime)
             shutil.copy2(latest, str(PROJECT_DIR / "render.mp4"))
-            return {"ok": True, "mp4_url": "/api/render.mp4", "log": log}
+            entry = auto_save_render(latest, req.quality)
+            return {
+                "ok": True,
+                "mp4_url": "/api/render.mp4",
+                "log": log,
+                "render_id": entry["id"],
+                "render_name": entry["name"],
+            }
         else:
             return {"ok": False, "mp4_url": None, "log": log}
 
@@ -343,6 +418,107 @@ def render_scene(req: RenderRequest):
         with open(PROJECT_DIR / "render.log", "w") as f:
             f.write(log)
         return {"ok": False, "mp4_url": None, "log": log}
+
+
+@app.post("/api/render/stream")
+async def render_scene_stream(req: RenderRequest):
+    ensure_project_dir()
+
+    scene_path = PROJECT_DIR / "scene.py"
+    with open(scene_path, "w") as f:
+        f.write(req.scene_code)
+
+    # Build env with Homebrew + LaTeX paths
+    env = os.environ.copy()
+    extra_paths = ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"]
+    if LATEX_AVAILABLE:
+        extra_paths.append("/Library/TeX/texbin")
+    existing = env.get("PATH", "")
+    env["PATH"] = ":".join(extra_paths) + ":" + existing
+
+    async def event_stream():
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m", "manim", "render",
+                f"-q{req.quality}",
+                "--media_dir", str(PROJECT_DIR / "media"),
+                str(scene_path),
+                "GeneratedScene",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(PROJECT_DIR),
+                env=env,
+            )
+
+            async def read_stream(stream):
+                while True:
+                    line = await stream.readline()
+                    if not line:
+                        break
+                    yield line.decode("utf-8", errors="replace").rstrip("\n")
+
+            log_lines = []
+
+            # Read both stdout and stderr concurrently
+            async def drain(stream):
+                async for line in read_stream(stream):
+                    log_lines.append(line)
+                    yield f"data: {json.dumps({'type': 'log', 'line': line})}\n\n"
+
+            # We need to interleave stdout and stderr. Use asyncio.Queue
+            queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+            async def enqueue_stream(stream):
+                async for line_bytes in stream:
+                    line = line_bytes.decode("utf-8", errors="replace").rstrip("\n")
+                    log_lines.append(line)
+                    await queue.put(line)
+                await queue.put(None)
+
+            # Start reading both streams
+            tasks = []
+            if proc.stdout:
+                tasks.append(asyncio.create_task(enqueue_stream(proc.stdout)))
+            if proc.stderr:
+                tasks.append(asyncio.create_task(enqueue_stream(proc.stderr)))
+
+            done_count = 0
+            total_streams = len(tasks)
+            while done_count < total_streams:
+                line = await queue.get()
+                if line is None:
+                    done_count += 1
+                    continue
+                yield f"data: {json.dumps({'type': 'log', 'line': line})}\n\n"
+
+            await proc.wait()
+            for t in tasks:
+                await t
+
+            full_log = "\n".join(log_lines)
+            with open(PROJECT_DIR / "render.log", "w") as f:
+                f.write(full_log)
+
+            mp4_files = glob.glob(
+                str(PROJECT_DIR / "media" / "**" / "*.mp4"), recursive=True
+            )
+
+            if mp4_files and proc.returncode == 0:
+                latest = max(mp4_files, key=os.path.getmtime)
+                shutil.copy2(latest, str(PROJECT_DIR / "render.mp4"))
+                entry = auto_save_render(latest, req.quality)
+                yield f"data: {json.dumps({'type': 'result', 'ok': True, 'mp4_url': '/api/render.mp4', 'log': full_log, 'render_id': entry['id'], 'render_name': entry['name']})}\n\n"
+            else:
+                yield f"data: {json.dumps({'type': 'result', 'ok': False, 'mp4_url': None, 'log': full_log})}\n\n"
+
+        except Exception as e:
+            log = f"Render error: {str(e)}"
+            with open(PROJECT_DIR / "render.log", "w") as f:
+                f.write(log)
+            yield f"data: {json.dumps({'type': 'result', 'ok': False, 'mp4_url': None, 'log': log})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 def extract_code_from_response(response_text: str) -> str:
@@ -379,28 +555,39 @@ def generate_from_sketch(req: GenerateRequest):
 
     user_text = req.prompt.strip() if req.prompt else "Generate Manim code that recreates this sketch as an animation."
 
+    # Build images list: prefer new multi-image field, fall back to legacy single-image
+    frames = req.images
+    if not frames and req.image_base64:
+        frames = [FrameImage(name="Sketch", base64=req.image_base64)]
+
+    if not frames:
+        return {"ok": False, "code": None, "error": "No images provided."}
+
+    # Build content blocks: label each frame, then add the user's text prompt
+    content_blocks: list[dict] = []
+    for i, frame in enumerate(frames, 1):
+        if len(frames) > 1:
+            content_blocks.append({
+                "type": "text",
+                "text": f"[Frame {i}: {frame.name}]",
+            })
+        content_blocks.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": frame.base64,
+            },
+        })
+    content_blocks.append({"type": "text", "text": user_text})
+
     try:
         client = anthropic.Anthropic(api_key=api_key)
         message = client.messages.create(
             model=req.model,
             max_tokens=8192,
             system=system_prompt,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": req.image_base64,
-                            },
-                        },
-                        {"type": "text", "text": user_text},
-                    ],
-                }
-            ],
+            messages=[{"role": "user", "content": content_blocks}],
         )
 
         response_text = message.content[0].text
@@ -471,6 +658,55 @@ def chat_refine(req: ChatRequest):
         return {"ok": False, "code": None, "error": f"Chat error: {e}"}
 
 
+# ---------------------------------------------------------------------------
+# Render library endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/renders")
+def list_renders():
+    return load_renders_index()
+
+
+@app.get("/api/renders/{render_id}/video")
+def get_render_video(render_id: str):
+    video_path = RENDERS_DIR / f"{render_id}.mp4"
+    if not video_path.exists():
+        return JSONResponse({"error": "Render not found"}, status_code=404)
+    return FileResponse(
+        str(video_path),
+        media_type="video/mp4",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+@app.patch("/api/renders/{render_id}")
+def rename_render(render_id: str, req: RenameRenderRequest):
+    renders = load_renders_index()
+    for r in renders:
+        if r["id"] == render_id:
+            r["name"] = req.name
+            save_renders_index(renders)
+            return {"ok": True}
+    return JSONResponse({"error": "Render not found"}, status_code=404)
+
+
+@app.delete("/api/renders/{render_id}")
+def delete_render(render_id: str):
+    renders = load_renders_index()
+    updated = [r for r in renders if r["id"] != render_id]
+    if len(updated) == len(renders):
+        return JSONResponse({"error": "Render not found"}, status_code=404)
+    save_renders_index(updated)
+    video_path = RENDERS_DIR / f"{render_id}.mp4"
+    if video_path.exists():
+        video_path.unlink()
+    return {"ok": True}
+
+
 @app.get("/api/render.mp4")
 def serve_render():
     mp4_path = PROJECT_DIR / "render.mp4"
@@ -485,3 +721,75 @@ def serve_render():
             "Expires": "0",
         },
     )
+
+
+@app.post("/api/renders/stitch")
+def stitch_renders(req: StitchRequest):
+    if len(req.render_ids) < 2:
+        return JSONResponse({"error": "Need at least 2 renders to stitch"}, status_code=400)
+
+    renders = load_renders_index()
+    render_map = {r["id"]: r for r in renders}
+
+    # Validate all render IDs exist and their files are present
+    for rid in req.render_ids:
+        if rid not in render_map:
+            return JSONResponse({"error": f"Render {rid} not found"}, status_code=404)
+        video_path = RENDERS_DIR / f"{rid}.mp4"
+        if not video_path.exists():
+            return JSONResponse({"error": f"Video file for {rid} missing"}, status_code=404)
+
+    RENDERS_DIR.mkdir(parents=True, exist_ok=True)
+    output_id = str(uuid.uuid4())
+    output_path = RENDERS_DIR / f"{output_id}.mp4"
+
+    # Write concat list
+    concat_fd, concat_path = tempfile.mkstemp(suffix=".txt", dir=str(RENDERS_DIR))
+    try:
+        with os.fdopen(concat_fd, "w") as f:
+            for rid in req.render_ids:
+                video_path = RENDERS_DIR / f"{rid}.mp4"
+                f.write(f"file '{video_path}'\n")
+
+        # Build env with Homebrew paths for ffmpeg
+        env = os.environ.copy()
+        extra_paths = ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"]
+        existing = env.get("PATH", "")
+        env["PATH"] = ":".join(extra_paths) + ":" + existing
+
+        # Try fast concat (stream copy)
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+             "-i", concat_path, "-c", "copy", str(output_path)],
+            capture_output=True, text=True, timeout=120, env=env,
+        )
+
+        if result.returncode != 0:
+            # Fall back to re-encode
+            result = subprocess.run(
+                ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                 "-i", concat_path, "-c:v", "libx264", "-c:a", "aac",
+                 str(output_path)],
+                capture_output=True, text=True, timeout=300, env=env,
+            )
+            if result.returncode != 0:
+                return JSONResponse(
+                    {"error": f"ffmpeg failed: {result.stderr[-500:]}"},
+                    status_code=500,
+                )
+    finally:
+        os.unlink(concat_path)
+
+    # Save as new render entry
+    name = req.name or f"Sequence ({len(req.render_ids)} clips)"
+    entry = {
+        "id": output_id,
+        "name": name,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "quality": "mixed",
+    }
+    renders = load_renders_index()
+    renders.append(entry)
+    save_renders_index(renders)
+
+    return {"ok": True, "render_id": output_id, "render_name": name}

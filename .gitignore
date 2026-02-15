@@ -7,3 +7,8 @@ projects/
 .env
 .DS_Store
 .claude/
+desktop/dist/
+desktop/frontend/
+desktop/backend/
+desktop/manim_code_samples/
+desktop/node_modules/

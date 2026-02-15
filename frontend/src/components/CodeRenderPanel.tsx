@@ -99,20 +99,6 @@ export default function CodeRenderPanel({
     }
   }, [videoUrl])
 
-  const handleDownload = async () => {
-    if (!videoUrl) return
-    const res = await fetch(videoUrl)
-    const blob = await res.blob()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = 'render.mp4'
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
-  }
-
   const statusColor =
     status === 'Saved' || status === 'Ready' || status === 'Rendered' || status === 'Generated'
       ? 'bg-green-900 text-green-300'
@@ -327,17 +313,9 @@ export default function CodeRenderPanel({
         {/* Video preview */}
         {videoUrl && (
           <div className="p-2">
-            <div className="flex items-center justify-between mb-1">
-              <h3 className="text-xs font-semibold text-gray-400">
-                Preview
-              </h3>
-              <button
-                onClick={handleDownload}
-                className="px-2 py-0.5 text-xs bg-blue-700 hover:bg-blue-600 rounded text-white transition-colors"
-              >
-                Download MP4
-              </button>
-            </div>
+            <h3 className="text-xs font-semibold text-gray-400 mb-1">
+              Preview
+            </h3>
             <video
               ref={videoRef}
               src={videoUrl}
