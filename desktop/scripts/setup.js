@@ -114,12 +114,19 @@ function rmrf(dir) {
 function download(url, destPath) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(destPath);
-    const get = url.startsWith('https') ? https.get : http.get;
+
+    const cleanup = (err) => {
+      file.close(() => {
+        try { fs.unlinkSync(destPath); } catch {}
+        reject(err);
+      });
+    };
 
     const request = (reqUrl, redirectCount = 0) => {
-      if (redirectCount > 10) return reject(new Error('Too many redirects'));
+      if (redirectCount > 10) return cleanup(new Error('Too many redirects'));
 
-      get(reqUrl, (res) => {
+      const proto = reqUrl.startsWith('https') ? https : http;
+      proto.get(reqUrl, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume();
           const loc = res.headers.location;
@@ -129,14 +136,11 @@ function download(url, destPath) {
         }
         if (res.statusCode !== 200) {
           res.resume();
-          return reject(new Error(`HTTP ${res.statusCode} for ${reqUrl}`));
+          return cleanup(new Error(`HTTP ${res.statusCode} for ${reqUrl}`));
         }
         res.pipe(file);
         file.on('finish', () => file.close(resolve));
-      }).on('error', (err) => {
-        try { fs.unlinkSync(destPath); } catch {};
-        reject(err);
-      });
+      }).on('error', cleanup);
     };
 
     request(url);

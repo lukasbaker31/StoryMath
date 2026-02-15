@@ -16,6 +16,8 @@ jobs:
             build_flag: --win
 
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
